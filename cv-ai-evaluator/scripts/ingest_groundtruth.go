@@ -1,19 +1,18 @@
 package main
 
 import (
-    "context"
-    "fmt"
-    "log"
-    "os"
-    "path/filepath"
+	"context"
+	"log"
+	"os"
+	"path/filepath"
 
-    "cv-ai-evaluator/config"
-    "cv-ai-evaluator/internal/database"
-    "cv-ai-evaluator/internal/models"
-    "cv-ai-evaluator/pkg/utils"
-    "cv-ai-evaluator/pkg/vectordb"
+	"cv-ai-evaluator/config"
+	"cv-ai-evaluator/internal/database"
+	"cv-ai-evaluator/internal/models"
+	"cv-ai-evaluator/pkg/utils"
+	"cv-ai-evaluator/pkg/vectordb"
 
-    "github.com/google/uuid"
+	"github.com/google/uuid"
 )
 
 func main() {
@@ -34,24 +33,24 @@ func main() {
         log.Fatalf("Failed to initialize ChromaDB: %v", err)
     }
 
-    // Initialize PDF extractor
-    pdfExtractor := utils.NewPDFExtractor()
+    // Initialize document reader (support PDF, MD, TXT)
+    docReader := utils.NewDocumentReader()
 
     ctx := context.Background()
 
     // Directory untuk ground truth documents
     groundTruthDir := "./storage/groundtruth"
 
-    // Ingest documents
+    // Ingest documents - BISA PDF atau MD atau TXT
     documents := []struct {
         filename string
         docType  models.GroundTruthType
         docName  string
     }{
-        {"job_description_backend.pdf", models.GroundTruthTypeJobDescription, "Backend Engineer Job Description"},
-        {"case_study_brief.pdf", models.GroundTruthTypeCaseStudyBrief, "CV AI Evaluator Case Study"},
-        {"cv_scoring_rubric.pdf", models.GroundTruthTypeCVRubric, "CV Evaluation Rubric"},
-        {"project_scoring_rubric.pdf", models.GroundTruthTypeProjectRubric, "Project Evaluation Rubric"},
+        {"job_description_backend.md", models.GroundTruthTypeJobDescription, "Backend Engineer Job Description"},
+        {"case_study_brief.md", models.GroundTruthTypeCaseStudyBrief, "CV AI Evaluator Case Study"},
+        {"cv_scoring_rubric.md", models.GroundTruthTypeCVRubric, "CV Evaluation Rubric"},
+        {"project_scoring_rubric.md", models.GroundTruthTypeProjectRubric, "Project Evaluation Rubric"},
     }
 
     for _, doc := range documents {
@@ -65,14 +64,14 @@ func main() {
 
         log.Printf("Ingesting: %s", doc.filename)
 
-        // Extract text from PDF
-        text, err := pdfExtractor.ExtractTextFromPDF(filePath)
+        // Read document (support PDF, MD, TXT)
+        text, err := docReader.ReadDocument(filePath)
         if err != nil {
-            log.Printf("Error extracting text from %s: %v", doc.filename, err)
+            log.Printf("Error reading document %s: %v", doc.filename, err)
             continue
         }
 
-        text = pdfExtractor.CleanText(text)
+        text = docReader.CleanText(text)
 
         // Generate ID
         docID := uuid.New().String()
