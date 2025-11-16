@@ -1,7 +1,10 @@
 package services
 
 import (
+	"errors" // PERBAIKAN: Tambahkan import errors
 	"fmt"
+	"io" // PERBAIKAN: Tambahkan import io
+	"log"
 	"mime/multipart"
 	"os"
 	"path/filepath"
@@ -10,6 +13,14 @@ import (
 	"cv-ai-evaluator/internal/models"
 
 	"github.com/google/uuid"
+)
+
+// PERBAIKAN: Definisi Sentinel Errors untuk error handling yang bersih
+var (
+	ErrInvalidFileType = errors.New("invalid file type")
+	ErrFileReadError   = errors.New("could not read uploaded file")
+	ErrFileSaveError   = errors.New("could not save file to disk")
+	ErrDatabaseError   = errors.New("database operation failed")
 )
 
 type DocumentService struct {
@@ -22,67 +33,73 @@ func NewDocumentService(uploadDir string) *DocumentService {
 	}
 }
 
-// UploadDocuments handles uploading CV and Report files
+// UploadDocuments menangani upload file CV dan Report
 func (s *DocumentService) UploadDocuments(cvFile, reportFile *multipart.FileHeader) (*models.UploadedDocument, *models.UploadedDocument, error) {
-	// Validate file extensions
+	// Validasi tipe file
 	if err := s.validateFileExtension(cvFile.Filename, ".pdf"); err != nil {
 		return nil, nil, fmt.Errorf("CV validation failed: %w", err)
 	}
 
 	if err := s.validateFileExtension(reportFile.Filename, ".pdf"); err != nil {
-		return nil, nil, fmt.Errorf("Report validation failed: %w", err)
+		return nil, nil, fmt.Errorf("report validation failed: %w", err)
 	}
 
-	// Create upload directory if not exists
+	// Buat direktori upload jika belum ada
 	if err := os.MkdirAll(s.uploadDir, 0755); err != nil {
 		return nil, nil, fmt.Errorf("failed to create upload directory: %w", err)
 	}
 
-	// Save CV
+	// Simpan CV
 	cvDoc, err := s.saveFile(cvFile, models.DocumentTypeCV)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to save CV: %w", err)
 	}
 
-	// Save Report
+	// Simpan Report
 	reportDoc, err := s.saveFile(reportFile, models.DocumentTypeProjectReport)
 	if err != nil {
-		// Rollback CV file if report fails
-		os.Remove(cvDoc.FilePath)
-		database.DB.Delete(cvDoc)
+		// Rollback (hapus file CV) jika file report gagal disimpan
+		if removeErr := os.Remove(cvDoc.FilePath); removeErr != nil {
+			log.Printf("Warning: failed to rollback file %s: %v", cvDoc.FilePath, removeErr)
+		}
+		if dbErr := database.DB.Delete(cvDoc).Error; dbErr != nil {
+			log.Printf("Warning: failed to rollback db record %s: %v", cvDoc.ID, dbErr)
+		}
 		return nil, nil, fmt.Errorf("failed to save report: %w", err)
 	}
 
 	return cvDoc, reportDoc, nil
 }
 
-// saveFile saves a single file and creates database record
+// saveFile menyimpan satu file dan membuat record di database
 func (s *DocumentService) saveFile(file *multipart.FileHeader, docType models.DocumentType) (*models.UploadedDocument, error) {
-	// Generate unique ID and filename
+	// Buat ID unik dan nama file
 	docID := uuid.New().String()
-	uniqueFilename := fmt.Sprintf("%s_%s", docID, file.Filename)
+	// PERBAIKAN: Bersihkan nama file menggunakan filepath.Base untuk keamanan
+	uniqueFilename := fmt.Sprintf("%s_%s", docID, filepath.Base(file.Filename))
 	filePath := filepath.Join(s.uploadDir, uniqueFilename)
 
-	// Open uploaded file
+	// Buka file yang di-upload
 	src, err := file.Open()
 	if err != nil {
-		return nil, fmt.Errorf("failed to open uploaded file: %w", err)
+		// PERBAIKAN: Bungkus (wrap) error dengan sentinel error
+		return nil, fmt.Errorf("%w: %v", ErrFileReadError, err)
 	}
 	defer src.Close()
 
-	// Create destination file
+	// Buat file tujuan
 	dst, err := os.Create(filePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create destination file: %w", err)
+		return nil, fmt.Errorf("%w: %v", ErrFileSaveError, err)
 	}
 	defer dst.Close()
 
-	// Copy file content
-	if _, err := dst.ReadFrom(src); err != nil {
-		return nil, fmt.Errorf("failed to save file content: %w", err)
+	// Copy konten file
+	if _, err := io.Copy(dst, src); err != nil { // PERBAIKAN: Gunakan io.Copy
+		return nil, fmt.Errorf("%w: %v", ErrFileSaveError, err)
 	}
 
-	// Create database record
+	// Buat record di database
 	doc := &models.UploadedDocument{
 		ID:               docID,
 		FilePath:         filePath,
@@ -91,24 +108,28 @@ func (s *DocumentService) saveFile(file *multipart.FileHeader, docType models.Do
 	}
 
 	if err := database.DB.Create(doc).Error; err != nil {
-		// Rollback file if database insert fails
-		os.Remove(filePath)
-		return nil, fmt.Errorf("failed to save document metadata: %w", err)
+		// Rollback (hapus file) jika insert ke DB gagal
+		if removeErr := os.Remove(filePath); removeErr != nil {
+			log.Printf("Warning: failed to rollback file %s on db error: %v", filePath, removeErr)
+		}
+		// PERBAIKAN: Bungkus error database
+		return nil, fmt.Errorf("%w: %v", ErrDatabaseError, err)
 	}
 
 	return doc, nil
 }
 
-// validateFileExtension validates file has correct extension
+// validateFileExtension memvalidasi file memiliki ekstensi yang benar
 func (s *DocumentService) validateFileExtension(filename string, expectedExt string) error {
 	ext := filepath.Ext(filename)
 	if ext != expectedExt {
-		return fmt.Errorf("invalid file extension: expected %s, got %s", expectedExt, ext)
+		// PERBAIKAN: Kembalikan error yang dibungkus dengan sentinel error
+		return fmt.Errorf("%w: expected %s, got %s", ErrInvalidFileType, expectedExt, ext)
 	}
 	return nil
 }
 
-// GetDocumentByID retrieves a document by ID
+// GetDocumentByID mengambil dokumen berdasarkan ID
 func (s *DocumentService) GetDocumentByID(id string) (*models.UploadedDocument, error) {
 	var doc models.UploadedDocument
 	if err := database.DB.First(&doc, "id = ?", id).Error; err != nil {
@@ -117,11 +138,11 @@ func (s *DocumentService) GetDocumentByID(id string) (*models.UploadedDocument, 
 	return &doc, nil
 }
 
-// ValidateDocumentsExist checks if CV and Report documents exist
+// ValidateDocumentsExist memeriksa apakah dokumen CV dan Report ada
 func (s *DocumentService) ValidateDocumentsExist(cvID, reportID string) error {
 	var count int64
 
-	// Check CV
+	// Cek CV
 	if err := database.DB.Model(&models.UploadedDocument{}).
 		Where("id = ? AND document_type = ?", cvID, models.DocumentTypeCV).
 		Count(&count).Error; err != nil {
@@ -131,7 +152,7 @@ func (s *DocumentService) ValidateDocumentsExist(cvID, reportID string) error {
 		return fmt.Errorf("CV document not found with id: %s", cvID)
 	}
 
-	// Check Report
+	// Cek Report
 	if err := database.DB.Model(&models.UploadedDocument{}).
 		Where("id = ? AND document_type = ?", reportID, models.DocumentTypeProjectReport).
 		Count(&count).Error; err != nil {
@@ -142,40 +163,4 @@ func (s *DocumentService) ValidateDocumentsExist(cvID, reportID string) error {
 	}
 
 	return nil
-}
-
-// DeleteDocument removes a document file and database record
-func (s *DocumentService) DeleteDocument(id string) error {
-	doc, err := s.GetDocumentByID(id)
-	if err != nil {
-		return err
-	}
-
-	// Delete file from filesystem
-	if err := os.Remove(doc.FilePath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to delete file: %w", err)
-	}
-
-	// Delete database record
-	if err := database.DB.Delete(doc).Error; err != nil {
-		return fmt.Errorf("failed to delete document record: %w", err)
-	}
-
-	return nil
-}
-
-// GetDocumentsByType retrieves documents by type with pagination
-func (s *DocumentService) GetDocumentsByType(docType models.DocumentType, limit, offset int) ([]models.UploadedDocument, error) {
-	var docs []models.UploadedDocument
-	
-	query := database.DB.Where("document_type = ?", docType).
-		Order("uploaded_at DESC").
-		Limit(limit).
-		Offset(offset)
-
-	if err := query.Find(&docs).Error; err != nil {
-		return nil, fmt.Errorf("failed to retrieve documents: %w", err)
-	}
-
-	return docs, nil
 }
